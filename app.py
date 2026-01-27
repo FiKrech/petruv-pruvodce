@@ -4,6 +4,8 @@ import numpy as np
 import time
 from fpdf import FPDF
 from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. NASTAVENÍ A BUSINESS LOGIKA ---
 st.set_page_config(page_title="Investiční Průvodce", page_icon="📈", layout="wide")
@@ -19,7 +21,34 @@ if 'user_name' not in st.session_state:
 
 KURZ_USD_CZK = 23.50
 
-# --- 2. DATABÁZE AKCIÍ ---
+# --- 2. GOOGLE SHEETS NAPOJENÍ (BACKEND) 🕵️‍♂️ ---
+def uloz_do_google_sheet(jmeno, email, portfolio):
+    try:
+        # Načtení klíče z tajné schránky (.streamlit/secrets.toml)
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+        client = gspread.authorize(creds)
+        
+        # Otevření tabulky
+        sheet = client.open("investicni_app_db").sheet1
+        
+        # Příprava dat
+        datum = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Portfolio převedeme na text, ať se vejde do jedné buňky
+        text_portfolio = ", ".join([f"{p['ticker']} ({p['ks']:.2f} ks)" for p in portfolio])
+        celkova_hodnota = sum([p['investice'] for p in portfolio])
+        
+        # Zápis řádku [Datum, Jméno, Email, Portfolio, Hodnota]
+        sheet.append_row([datum, jmeno, email, text_portfolio, int(celkova_hodnota)])
+        return True
+        
+    except Exception as e:
+        # Když se to nepovede (např. špatný klíč), vypíšeme chybu jen do konzole, ne uživateli
+        print(f"CHYBA ZÁPISU: {e}")
+        return False
+
+# --- 3. DATABÁZE AKCIÍ ---
 db_akcii = [
     {"ticker": "KO", "name": "Coca-Cola", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", "duvod": "Legenda."},
     {"ticker": "PEP", "name": "PepsiCo", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", "duvod": "Lays."},
@@ -33,7 +62,7 @@ db_akcii = [
     {"ticker": "XOM", "name": "Exxon Mobil", "styl": "Dividenda", "riziko": "Střední", "sektor": "Energie", "duvod": "Ropa."},
 ]
 
-# --- 3. PDF GENERÁTOR ---
+# --- 4. PDF GENERÁTOR ---
 def generuj_pdf(portfolio, jmeno_uzivatele):
     pdf = FPDF()
     pdf.add_page()
@@ -66,7 +95,7 @@ def generuj_pdf(portfolio, jmeno_uzivatele):
     pdf.cell(0, 10, f"Celkova hodnota: {int(celkem_kc):,} CZK", ln=True)
     return pdf.output(dest='S').encode('latin-1', 'replace')
 
-# --- 4. DATA SIMULÁTOR ---
+# --- 5. DATA SIMULÁTOR ---
 @st.cache_data(ttl=3600)
 def ziskej_data_simulace(ticker, styl):
     seed = sum(ord(c) for c in ticker)
@@ -83,7 +112,7 @@ def ziskej_data_simulace(ticker, styl):
     logo_url = f"https://financialmodelingprep.com/image-stock/{ticker}.png"
     return round(cena, 2), "USD", div_yield, logo_url, graf_data
 
-# --- 5. DASHBOARD RENTIÉRA (Sněhová koule) ❄️ ---
+# --- 6. DASHBOARD RENTIÉRA ---
 def dashboard_rentiera(jmeno, portfolio):
     st.balloons()
     st.title(f"👋 Vítej v klubu, {jmeno}!")
@@ -91,9 +120,7 @@ def dashboard_rentiera(jmeno, portfolio):
     
     st.markdown("---")
     
-    # A) PŘEHLED MAJETKU
     celkem_investovano = sum([p['investice'] for p in portfolio]) if portfolio else 0
-    
     aktualni_hodnota = celkem_investovano * 1.023 
     zisk = aktualni_hodnota - celkem_investovano
     
@@ -104,13 +131,11 @@ def dashboard_rentiera(jmeno, portfolio):
         rocni_divi = celkem_investovano * 0.034
         st.metric("Očekávaná Renta", f"{int(rocni_divi):,} Kč / rok", "Pasivní příjem")
     with m3:
-        # Tady byl problém, teď opraveno
         akcie_ve_sleve = portfolio[0]['name'] if portfolio else "Coca-Cola"
         st.metric(f"🔥 {akcie_ve_sleve}", "VE SLEVĚ", "-1.5 % (Příležitost)", delta_color="inverse")
     
     st.markdown("---")
     
-    # B) SNĚHOVÁ KOULE
     st.subheader("❄️ Efekt Sněhové koule")
     st.caption("Co se stane, když budeš jen držet a reinvestovat dividendy.")
     
@@ -124,15 +149,12 @@ def dashboard_rentiera(jmeno, portfolio):
         hodnoty.append(castka)
         
     df_snowball = pd.DataFrame({"Rok": roky, "Hodnota Majetku": hodnoty})
-    
-    # TADY BYL PROBLÉM - OPRAVENO
     st.area_chart(df_snowball.set_index("Rok"), color="#2E8B57")
     
     st.info(f"💡 **Vidíš to?** Za 20 let se tvých {int(celkem_investovano):,} Kč může proměnit na **{int(hodnoty[-1]):,} Kč**, aniž bys hnul prstem.")
     
     st.markdown("---")
     
-    # C) AKCE
     c1, c2 = st.columns(2)
     with c1:
         pdf_bytes = generuj_pdf(portfolio, jmeno)
@@ -140,7 +162,7 @@ def dashboard_rentiera(jmeno, portfolio):
     with c2:
         st.link_button("🏦 Přejít do ostrého účtu (Broker)", "https://www.xtb.com/cz", type="primary")
 
-# --- 6. MODÁL NÁKUPU ---
+# --- 7. MODÁL NÁKUPU ---
 @st.dialog("Potvrzení nákupu")
 def nakupni_okno(firma, cena_usd, div_yield, logo_url):
     c1, c2 = st.columns([1, 4])
@@ -169,7 +191,7 @@ def nakupni_okno(firma, cena_usd, div_yield, logo_url):
         time.sleep(0.5)
         st.rerun()
 
-# --- 7. HLAVNÍ UI ---
+# --- 8. HLAVNÍ UI ---
 with st.sidebar:
     st.header("🧮 Filtr")
     cil = st.radio("Cíl", ["Dividenda", "Růst"])
@@ -184,7 +206,6 @@ if st.session_state.lead_captured:
 else:
     st.title("🦄 Petrův Investiční Průvodce")
 
-    # PORTFOLIO NÁHLED
     if st.session_state.moje_portfolio:
         with st.container(border=True):
             st.info("💼 Tvoje portfolio (Návrh)")
@@ -203,13 +224,18 @@ else:
             
             if st.button("🚀 Vstoupit do Zóny", type="primary"):
                 if "@" in email and len(jmeno) > 0:
+                    # 1. ZÁPIS DO GOOGLE SHEETS 📝
+                    uspech = uloz_do_google_sheet(jmeno, email, st.session_state.moje_portfolio)
+                    
+                    # 2. POKRAČOVÁNÍ V APLIKACI
                     st.session_state.lead_captured = True
                     st.session_state.user_name = jmeno
+                    if uspech:
+                        st.toast("Data uložena! Vítej.")
                     st.rerun()
                 else:
                     st.error("Vyplň údaje.")
 
-    # VÝPIS AKCIÍ
     if st.session_state.hledani_hotovo:
         nalezeno = [x for x in db_akcii if x['styl'] == cil and 
                    (riziko == x['riziko'] or (riziko == "Střední" and x['riziko'] == "Nízké") or (riziko == "Vysoké")) and
