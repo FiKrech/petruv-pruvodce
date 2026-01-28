@@ -2,277 +2,398 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-from fpdf import FPDF
 from datetime import datetime
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import yfinance as yf
 
-# --- 1. NASTAVENÍ A BUSINESS LOGIKA ---
-st.set_page_config(page_title="Investiční Průvodce", page_icon="📈", layout="wide")
+# --- 1. CONFIG & CSS ---
+st.set_page_config(page_title="Petrův Průvodce", page_icon="🦄", layout="wide")
 
-if 'hledani_hotovo' not in st.session_state:
-    st.session_state.hledani_hotovo = False
-if 'moje_portfolio' not in st.session_state:
-    st.session_state.moje_portfolio = []
-if 'lead_captured' not in st.session_state:
-    st.session_state.lead_captured = False 
-if 'user_name' not in st.session_state:
-    st.session_state.user_name = ""
+st.markdown("""
+    <style>
+    .stApp {
+        background: linear-gradient(to bottom right, #0e1117, #161b22);
+        color: #e0e0e0;
+    }
+    .big-font { font-size: 20px !important; }
+    .card-highlight { background-color: #1f2937; padding: 15px; border-radius: 10px; border: 1px solid #374151; margin-bottom: 10px; }
+    
+    /* Vlastní styly pro Anti-Panic štítky */
+    .status-badge { padding: 5px 10px; border-radius: 5px; font-weight: bold; }
+    .status-discount { background-color: #2563eb; color: white; } /* Modrá je neutrální/informační */
+    .status-growth { background-color: #059669; color: white; }   /* Zelená pro růst */
+    
+    .stAlert { background-color: #1f2937; border: 1px solid #374151; color: #e0e0e0; }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- SESSION STATE INITIALIZATION ---
+if 'page' not in st.session_state: st.session_state.page = "intro" 
+if 'moje_portfolio' not in st.session_state: st.session_state.moje_portfolio = []
+if 'user_name' not in st.session_state: st.session_state.user_name = "Návštěvník"
+if 'temp_cil' not in st.session_state: st.session_state.temp_cil = "Dividenda" # Default
 
 KURZ_USD_CZK = 23.50
 
-# --- 2. GOOGLE SHEETS NAPOJENÍ (BACKEND) 🕵️‍♂️ ---
-def uloz_do_google_sheet(jmeno, email, portfolio):
-    try:
-        # Načtení klíče z tajné schránky (.streamlit/secrets.toml)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
-        client = gspread.authorize(creds)
-        
-        # Otevření tabulky
-        sheet = client.open("investicni_app_db").sheet1
-        
-        # Příprava dat
-        datum = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Portfolio převedeme na text, ať se vejde do jedné buňky
-        text_portfolio = ", ".join([f"{p['ticker']} ({p['ks']:.2f} ks)" for p in portfolio])
-        celkova_hodnota = sum([p['investice'] for p in portfolio])
-        
-        # Zápis řádku [Datum, Jméno, Email, Portfolio, Hodnota]
-        sheet.append_row([datum, jmeno, email, text_portfolio, int(celkova_hodnota)])
-        return True
-        
-    except Exception as e:
-        # Když se to nepovede (např. špatný klíč), vypíšeme chybu jen do konzole, ne uživateli
-        print(f"CHYBA ZÁPISU: {e}")
-        return False
+# --- 2. JARVIS TOOLS (FUNKCE) ---
 
-# --- 3. DATABÁZE AKCIÍ ---
+# A) Anti-Panic Logic 🧠 (Compliance Update)
+def get_position_status(current_price, avg_buy_price):
+    """
+    Rozhoduje o statusu pozice.
+    UPDATE: Odstraněn imperativ 'Kupuj'. Nyní pouze informuje o slevě.
+    """
+    diff = current_price - avg_buy_price
+    percent_change = (diff / avg_buy_price) * 100
+    
+    if percent_change >= 0:
+        return {
+            "status": "GROWTH",
+            "color": "#059669", 
+            "icon": "📈",
+            "label": f"Roste (+{percent_change:.1f} %)",
+            "message": "Investice se zhodnocuje."
+        }
+    else:
+        # Psychologický trik zachován, ale text je právně bezpečný
+        return {
+            "status": "DISCOUNT",
+            "color": "#2563eb", # Modrá (Info), ne Oranžová (Warning)
+            "icon": "📉", 
+            "label": f"Cena je níže ({percent_change:.1f} %)",
+            "message": f"Aktuálně levnější o {abs(int(diff * KURZ_USD_CZK))} Kč na kus."
+        }
+
+# B) Simulace Trhu (God Mode)
+def apply_market_sentiment(price):
+    factor = st.session_state.get('market_factor', 1.0) 
+    return price * factor
+
+# --- 3. DATABÁZE ---
 db_akcii = [
-    {"ticker": "KO", "name": "Coca-Cola", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", "duvod": "Legenda."},
-    {"ticker": "PEP", "name": "PepsiCo", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", "duvod": "Lays."},
-    {"ticker": "JNJ", "name": "Johnson & Johnson", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Zdraví", "duvod": "AAA rating."},
-    {"ticker": "MCD", "name": "McDonald's", "styl": "Dividenda", "riziko": "Střední", "sektor": "Gastro", "duvod": "Realitní firma."},
-    {"ticker": "AAPL", "name": "Apple", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", "duvod": "Ekosystém."},
-    {"ticker": "MSFT", "name": "Microsoft", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", "duvod": "Cloud."},
-    {"ticker": "TSLA", "name": "Tesla", "styl": "Růst", "riziko": "Vysoké", "sektor": "Tech / Auto", "duvod": "Volatilita."},
-    {"ticker": "NVDA", "name": "Nvidia", "styl": "Růst", "riziko": "Vysoké", "sektor": "Tech", "duvod": "AI čipy."},
-    {"ticker": "O", "name": "Realty Income", "styl": "Dividenda", "riziko": "Střední", "sektor": "Nemovitosti", "duvod": "Měsíční dividenda."},
-    {"ticker": "XOM", "name": "Exxon Mobil", "styl": "Dividenda", "riziko": "Střední", "sektor": "Energie", "duvod": "Ropa."},
+    # DIVIDENDOVÉ
+    {"ticker": "KO", "name": "Coca-Cola", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", 
+     "duvod": "Legenda. Když je krize, lidi pijí Colu.", "rule_40": False, "ps_ratio": 6.5, 
+     "div_yield": 3.1, "div_months": ["Duben", "Červenec", "Říjen", "Prosinec"]},
+    {"ticker": "PEP", "name": "PepsiCo", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", 
+     "duvod": "Vlastní i chipsy Lays. Diverzifikace.", "rule_40": False, "ps_ratio": 2.8, 
+     "div_yield": 3.0, "div_months": ["Leden", "Březen", "Červen", "Září"]},
+    {"ticker": "JNJ", "name": "Johnson & Johnson", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Zdraví", 
+     "duvod": "AAA rating. Stabilnější než vláda USA.", "rule_40": False, "ps_ratio": 4.1, 
+     "div_yield": 2.9, "div_months": ["Březen", "Červen", "Září", "Prosinec"]},
+    {"ticker": "MCD", "name": "McDonald's", "styl": "Dividenda", "riziko": "Střední", "sektor": "Gastro", 
+     "duvod": "Realitní firma převlečená za burgery.", "rule_40": False, "ps_ratio": 8.2, 
+     "div_yield": 2.3, "div_months": ["Březen", "Červen", "Září", "Prosinec"]},
+    {"ticker": "O", "name": "Realty Income", "styl": "Dividenda", "riziko": "Střední", "sektor": "Nemovitosti", 
+     "duvod": "The Monthly Dividend Company.", "rule_40": False, "ps_ratio": 5.0, 
+     "div_yield": 5.2, "div_months": ["Leden", "Únor", "Březen", "Duben", "Květen", "Červen", "Červenec", "Srpen", "Září", "Říjen", "Listopad", "Prosinec"]},
+    
+    # RŮSTOVÉ
+    {"ticker": "AAPL", "name": "Apple", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", 
+     "duvod": "Ekosystém, ze kterého se neodchází.", "rule_40": True, "ps_ratio": 7.5, "div_yield": 0.5, "div_months": []},
+    {"ticker": "MSFT", "name": "Microsoft", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", 
+     "duvod": "Windows a Cloud. Motor byznysu.", "rule_40": True, "ps_ratio": 12.0, "div_yield": 0.7, "div_months": []},
+    {"ticker": "NVDA", "name": "Nvidia", "styl": "Růst", "riziko": "Vysoké", "sektor": "Tech", 
+     "duvod": "AI čipy. Zlato 21. století.", "rule_40": True, "ps_ratio": 35.0, "div_yield": 0, "div_months": []},
 ]
 
-# --- 4. PDF GENERÁTOR ---
-def generuj_pdf(portfolio, jmeno_uzivatele):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    safe_user = jmeno_uzivatele.encode('latin-1', 'ignore').decode('latin-1')
-    pdf.cell(0, 10, f"Investicni Plan pro: {safe_user}", ln=True, align='C')
-    
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 10, f"Vygenerovano: {datetime.now().strftime('%d.%m.%Y %H:%M')}", ln=True, align='C')
-    pdf.ln(10)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(60, 10, "Spolecnost", 1)
-    pdf.cell(40, 10, "Pocet ks", 1)
-    pdf.cell(50, 10, "Investice (CZK)", 1)
-    pdf.ln()
-    
-    pdf.set_font("Arial", size=12)
-    celkem_kc = 0
-    for p in portfolio:
-        safe_name = p['name'].encode('latin-1', 'ignore').decode('latin-1')
-        pdf.cell(60, 10, safe_name, 1)
-        pdf.cell(40, 10, f"{p['ks']:.2f}", 1)
-        pdf.cell(50, 10, f"{int(p['investice']):,} CZK", 1)
-        pdf.ln()
-        celkem_kc += p['investice']
-    pdf.ln(10)
-    
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, f"Celkova hodnota: {int(celkem_kc):,} CZK", ln=True)
-    return pdf.output(dest='S').encode('latin-1', 'replace')
+# --- 4. ENGINE DAT ---
+@st.cache_data(ttl=3600, show_spinner=False) 
+def ziskej_data_yahoo(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1y")
+        if hist.empty: return None
+        cena = hist['Close'].iloc[-1]
+        graf_data = hist[['Close']].reset_index(drop=True)
+        return round(float(cena), 2), "USD", graf_data
+    except Exception:
+        return None
 
-# --- 5. DATA SIMULÁTOR ---
-@st.cache_data(ttl=3600)
 def ziskej_data_simulace(ticker, styl):
     seed = sum(ord(c) for c in ticker)
     np.random.seed(seed)
     base_price = np.random.randint(50, 400)
+    base_price = apply_market_sentiment(base_price)
     points = 30 
     trend = np.linspace(0, 50 if styl == "Růst" else 10, points)
     volatilita = np.random.normal(0, 5 if styl == "Růst" else 2, points)
     krivka = [float(x) for x in (base_price + trend + volatilita)]
-    
     graf_data = pd.DataFrame(krivka, columns=['Close'])
-    cena = krivka[-1]
-    div_yield = 0.03 if styl == "Dividenda" else 0.005
-    logo_url = f"https://financialmodelingprep.com/image-stock/{ticker}.png"
-    return round(cena, 2), "USD", div_yield, logo_url, graf_data
+    return round(krivka[-1], 2), "USD", graf_data
 
-# --- 6. DASHBOARD RENTIÉRA ---
-def dashboard_rentiera(jmeno, portfolio):
-    st.balloons()
-    st.title(f"👋 Vítej v klubu, {jmeno}!")
-    st.write("Tohle je tvůj nový velitelský můstek. Zde sledujeme, jak tvé peníze pracují.")
-    
-    st.markdown("---")
-    
-    celkem_investovano = sum([p['investice'] for p in portfolio]) if portfolio else 0
-    aktualni_hodnota = celkem_investovano * 1.023 
-    zisk = aktualni_hodnota - celkem_investovano
-    
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("Hodnota Portfolia", f"{int(aktualni_hodnota):,} Kč", f"+{int(zisk)} Kč (2.3 %)")
-    with m2:
-        rocni_divi = celkem_investovano * 0.034
-        st.metric("Očekávaná Renta", f"{int(rocni_divi):,} Kč / rok", "Pasivní příjem")
-    with m3:
-        akcie_ve_sleve = portfolio[0]['name'] if portfolio else "Coca-Cola"
-        st.metric(f"🔥 {akcie_ve_sleve}", "VE SLEVĚ", "-1.5 % (Příležitost)", delta_color="inverse")
-    
-    st.markdown("---")
-    
-    st.subheader("❄️ Efekt Sněhové koule")
-    st.caption("Co se stane, když budeš jen držet a reinvestovat dividendy.")
-    
-    roky = list(range(2025, 2045))
-    hodnoty = []
-    castka = celkem_investovano if celkem_investovano > 0 else 10000 
-    urok = 0.08 
-    
-    for _ in roky:
-        castka = castka * (1 + urok)
-        hodnoty.append(castka)
-        
-    df_snowball = pd.DataFrame({"Rok": roky, "Hodnota Majetku": hodnoty})
-    st.area_chart(df_snowball.set_index("Rok"), color="#2E8B57")
-    
-    st.info(f"💡 **Vidíš to?** Za 20 let se tvých {int(celkem_investovano):,} Kč může proměnit na **{int(hodnoty[-1]):,} Kč**, aniž bys hnul prstem.")
-    
-    st.markdown("---")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        pdf_bytes = generuj_pdf(portfolio, jmeno)
-        st.download_button("📄 Stáhnout PDF Plán", pdf_bytes, "plan.pdf", "application/pdf", type="secondary")
-    with c2:
-        st.link_button("🏦 Přejít do ostrého účtu (Broker)", "https://www.xtb.com/cz", type="primary")
-
-# --- 7. MODÁL NÁKUPU ---
-@st.dialog("Potvrzení nákupu")
-def nakupni_okno(firma, cena_usd, div_yield, logo_url):
-    c1, c2 = st.columns([1, 4])
-    with c1:
-        if logo_url: st.image(logo_url, width=50)
-    with c2:
-        st.subheader(firma['name'])
-        st.caption(f"Cena: {cena_usd} USD")
-    st.markdown("---")
-    typ_nakupu = st.radio("Režim:", ["Podle částky (Kč)", "Podle kusů (ks)"], horizontal=True)
-    if typ_nakupu == "Podle částky (Kč)":
-        investice_czk = st.number_input("Částka v Kč:", min_value=100, value=2000, step=100)
-        investice_usd = investice_czk / KURZ_USD_CZK
-        pocet_akcii = investice_usd / cena_usd if cena_usd > 0 else 0
+def ziskej_data_smart(ticker, styl):
+    raw_data = ziskej_data_yahoo(ticker)
+    if raw_data:
+        cena_real, mena, graf = raw_data
+        cena_simulated = apply_market_sentiment(cena_real)
+        return cena_simulated, mena, graf
     else:
-        pocet_akcii = st.number_input("Počet akcií:", min_value=0.1, value=1.0, step=0.1)
-        investice_usd = pocet_akcii * cena_usd
-        investice_czk = investice_usd * KURZ_USD_CZK
-        st.info(f"Cena: **{int(investice_czk)} Kč**")
+        return ziskej_data_simulace(ticker, styl)
+
+# --- 6. MODÁL NÁKUPU ---
+@st.dialog("Nastavení investice")
+def nakupni_okno(firma, cena_usd):
+    st.subheader(f"Kupuješ: {firma['name']}")
+    col_img, col_info = st.columns([1, 3])
+    with col_img: st.image(f"https://financialmodelingprep.com/image-stock/{firma['ticker']}.png", width=50)
+    with col_info: st.metric("Aktuální cena", f"{cena_usd:.2f} USD", f"{int(cena_usd * KURZ_USD_CZK)} Kč")
     
-    if st.button(f"✅ Přidat do plánu", type="primary"):
+    st.markdown("---")
+    typ_nakupu = st.radio("Jak chceš nakoupit?", ["Chci investovat částku (Kč)", "Chci konkrétní počet kusů (ks)"])
+    if "částku" in typ_nakupu:
+        investice_czk = st.number_input("Kolik chceš investovat (Kč)?", min_value=100, value=1000, step=100)
+        investice_usd = investice_czk / KURZ_USD_CZK
+        pocet_akcii = investice_usd / cena_usd
+        st.info(f"💡 Za **{investice_czk} Kč** dostaneš **{pocet_akcii:.4f} ks** akcie.")
+    else:
+        pocet_akcii = st.number_input("Kolik akcií?", min_value=0.1, value=1.0, step=0.1)
+        investice_czk = pocet_akcii * cena_usd * KURZ_USD_CZK
+        st.info(f"💡 **{pocet_akcii} ks** tě bude stát cca **{int(investice_czk)} Kč**.")
+    
+    st.warning("ℹ️ **Spread (Poplatek):** Cca 0.5 %. To je normální, nelekni se malého mínusu po nákupu.")
+    
+    if st.button("✅ Potvrdit", type="primary"):
         st.session_state.moje_portfolio.append({
-            "ticker": firma['ticker'], "name": firma['name'], "ks": pocet_akcii, "investice": investice_czk, "logo": logo_url
+            "ticker": firma['ticker'], 
+            "name": firma['name'], 
+            "ks": pocet_akcii, 
+            "investice_czk": investice_czk,
+            "buy_price_usd": cena_usd, 
+            "yield": firma.get('div_yield', 0), 
+            "months": firma.get('div_months', [])
         })
-        st.toast("Přidáno! Pokračuj ve výběru.")
-        time.sleep(0.5)
+        st.toast(f"{firma['name']} přidána do portfolia!", icon="🎒")
+        time.sleep(1)
         st.rerun()
 
-# --- 8. HLAVNÍ UI ---
+# --- 7. SIDEBAR (GOD MODE) ---
 with st.sidebar:
-    st.header("🧮 Filtr")
-    cil = st.radio("Cíl", ["Dividenda", "Růst"])
-    riziko = st.select_slider("Riziko", options=["Nízké", "Střední", "Vysoké"])
-    vsechny_sektory = sorted(list(set([x['sektor'] for x in db_akcii])))
-    oblibene_sektory = st.multiselect("Sektory", vsechny_sektory, default=vsechny_sektory)
-    if st.button("🔍 Najít", type="primary"):
-        st.session_state.hledani_hotovo = True
+    st.header("⚙️ God Mode (Simulace)")
+    market_sentiment = st.slider("Nálada trhu", min_value=0.5, max_value=1.5, value=1.0, step=0.1)
+    st.session_state.market_factor = market_sentiment
+    if market_sentiment < 1.0:
+        st.error(f"📉 SIMULACE POKLESU: -{int((1-market_sentiment)*100)} %")
+    st.divider()
 
-if st.session_state.lead_captured:
-    dashboard_rentiera(st.session_state.user_name, st.session_state.moje_portfolio)
-else:
-    st.title("🦄 Petrův Investiční Průvodce")
+# --- 8. UI APLIKACE (MAIN FLOW) ---
+
+if st.session_state.page == "intro":
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.title("🦄 Petrův Průvodce")
+        st.markdown("### Investování bez 'finanční latiny'.")
+        st.write("Většina lidí se bojí ztráty, protože nerozumí trhu. My ti ukážeme, že je to jednodušší než nákup na eshopu.")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("🚀 Začít vybírat", type="primary", use_container_width=True):
+                st.session_state.page = "wizard_1"
+                st.rerun()
+        with col_btn2:
+            if st.button("🎓 Rychlokurz (3 min)", type="secondary", use_container_width=True):
+                st.session_state.page = "education"
+                st.rerun()
+    with c2:
+        st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=200)
+
+elif st.session_state.page == "education":
+    st.title("🎓 Rychlokurz investora")
+    st.write("Pár minut čtení, které ti změní pohled na peníze.")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Kráva vs. Tele", "Teorie Benzínu", "Pizza Teorie", "Sněhová koule"])
+    
+    with tab1:
+        st.subheader("Dividenda vs. Růst")
+        st.info("🥛 **Sběrači (Dividenda):** Chtějí 'krávu na mléko'. Firma jim posílá část zisku na účet.")
+        st.warning("🐂 **Lovci (Růst):** Chtějí 'tele, co vyroste'. Firma zisk neposílá, ale investuje do sebe.")
+    
+    with tab2:
+        st.subheader("Proč trhy kolísají? (Teorie Benzínu ⛽)")
+        st.write("Když přijedeš na pumpu a benzín stojí 25 Kč místo 40 Kč, co uděláš?")
+        st.success("Většina lidí by natankovala plnou. S akciemi je to **podobné**. Pokud firma hospodaří zdravě, červená čísla znamenají slevu.")
+    
+    with tab3:
+        st.subheader("Teorie Pizzy 🍕")
+        st.write("Dvě firmy můžou být stejně hodnotné (stejně velká pizza), ale jedna bude mít 'levnější' akcii jen proto, že pizzu rozkrájela na více dílků.")
+        st.info("💡 **Poučení:** Nekoukej na cenu akcie, koukej na hodnotu firmy.")
+        
+    with tab4:
+        st.subheader("Sněhová koule (Složené úročení) ❄️")
+        st.write("Albert Einstein to prý nazval osmým divem světa.")
+        st.write("Když zisky nevybereš, ale necháš je vydělávat další zisky, tvoje peníze se začnou nabalovat jako koule ze svahu.")
+        st.markdown("**100 Kč** ➡️ (+10%) ➡️ **110 Kč** ➡️ (+10%) ➡️ **121 Kč**... a za pár let je to lavina.")
+
+    if st.button("⬅️ Jdeme na to", type="secondary"):
+        st.session_state.page = "intro"
+        st.rerun()
+
+elif st.session_state.page == "wizard_1":
+    st.progress(25)
+    st.subheader("1. Jaký je tvůj cíl?")
+    st.caption("💡 Vyber si strategii. Neboj, kalkulačka za tebe pohlídá důležité metriky.")
+    
+    volba = st.radio("Chci spíše:", ["🅰️ Pravidelná výplata (Dividenda)", "🅱️ Budování majetku (Růst)"])
+    
+    # Vysvětlení metrik na základě volby (Educational Overlay)
+    if "Dividenda" in volba:
+        st.info("ℹ️ **Na co dáváme pozor:** U dividendových firem pro tebe hlídáme **historii vyplácení**. Hledáme firmy, které platí spolehlivě jako švýcarské hodinky, i když je krize.")
+    else:
+        st.info("ℹ️ **Na co dáváme pozor:** U růstových firem hlídáme **zdraví byznysu** (např. Rule of 40 nebo P/S poměr). Zajímá nás, jestli firma reálně vydělává, nebo je to jen nafouknutá bublina.")
+
+    if st.button("Dále ➡️", type="primary"):
+        st.session_state.temp_cil = "Dividenda" if "Dividenda" in volba else "Růst"
+        st.session_state.page = "wizard_2"
+        st.rerun()
+
+elif st.session_state.page == "wizard_2":
+    st.progress(50)
+    st.subheader("2. Test odolnosti")
+    st.write("Investoval jsi 10 000 Kč. Za měsíc vidíš, že hodnota klesla na 8 000 Kč. Co uděláš?")
+    
+    # Rozepsané možnosti pro lepší empatii
+    reakce = st.radio("Upřímně:", [
+        "😱 Prodám to, protože se bojím, že spadnu na nulu.", 
+        "😐 Nic neudělám, chci akcie držet dlouhodobě.", 
+        "🤩 Super, teď můžu za míň peněz dokoupit víc (jako u benzínu)."
+    ])
+    
+    if st.button("Dále ➡️", type="primary"):
+        if "Prodám" in reakce: st.session_state.temp_riziko = "Nízké"
+        elif "Nic" in reakce: st.session_state.temp_riziko = "Střední"
+        else: st.session_state.temp_riziko = "Vysoké"
+        st.session_state.page = "wizard_3"
+        st.rerun()
+
+elif st.session_state.page == "wizard_3":
+    st.progress(75)
+    st.subheader("3. Čemu rozumíš?")
+    
+    # Warren Buffett Quote
+    st.markdown("""
+    > *"Nikdy neinvestuj do byznysu, kterému nerozumíš."* > — Warren Buffett
+    """)
+    st.write("Vyber sektory, které znáš z běžného života. Nemusíš být expert, stačí, že jsi zákazník.")
+
+    sektory_human = {"Konzum": "Jídlo a Pití (Cola, Pepsi)", "Tech": "Technologie (Apple, Microsoft)", "Zdraví": "Zdraví (Léky)", "Energie": "Energie (Benzín)", "Nemovitosti": "Nemovitosti"}
+    vyber = st.multiselect("Vyber oblasti:", list(sektory_human.keys()), format_func=lambda x: sektory_human[x])
+    
+    if st.button("🎉 Ukázat výsledky", type="primary"):
+        st.session_state.temp_sektory = vyber
+        st.session_state.page = "results"
+        st.rerun()
+
+elif st.session_state.page == "results":
+    # Logika stejná jako předtím...
+    st.progress(100)
+    cil = st.session_state.temp_cil
+    riziko = st.session_state.temp_riziko
+    sektory = st.session_state.temp_sektory
+    
+    nalezeno = [x for x in db_akcii if x['styl'] == cil and 
+               (riziko == x['riziko'] or (riziko == "Střední" and x['riziko'] == "Nízké") or (riziko == "Vysoké")) and
+               (not sektory or x['sektor'] in sektory)]
+    
+    if not nalezeno:
+        st.warning("🧐 Pro tuto kombinaci jsme museli trochu rozšířit hledání.")
+        nalezeno = [x for x in db_akcii if x['styl'] == cil][:3]
+
+    st.subheader(f"Našli jsme {len(nalezeno)} příležitostí")
+    
+    col_main, col_detail = st.columns([2, 1])
+    
+    with col_main:
+        for firma in nalezeno:
+            cena_usd, mena, graf_data = ziskej_data_smart(firma['ticker'], firma['styl'])
+            with st.container():
+                st.markdown(f'<div class="card-highlight">', unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([1, 3, 2])
+                with c1: st.image(f"https://financialmodelingprep.com/image-stock/{firma['ticker']}.png", width=60)
+                with c2:
+                    st.markdown(f"### {firma['name']}")
+                    st.caption(f"{firma['sektor']} • {firma['duvod']}")
+                with c3:
+                    if st.button(f"🛒 Koupit", key=f"btn_{firma['ticker']}", type="secondary", use_container_width=True):
+                        nakupni_okno(firma, cena_usd)
+                st.area_chart(graf_data, height=80, color="#059669" if cil=="Dividenda" else "#4b0082")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_detail:
+        st.info("💡 **Tip:** Všechny tyto firmy jsou prověřené. Klikni na 'Koupit', abys viděl, kolik akcií dostaneš za své peníze.")
 
     if st.session_state.moje_portfolio:
-        with st.container(border=True):
-            st.info("💼 Tvoje portfolio (Návrh)")
-            cols = st.columns(len(st.session_state.moje_portfolio))
-            for i, p in enumerate(st.session_state.moje_portfolio):
-                with cols[i]:
-                    if p['logo']: st.image(p['logo'], width=30)
-                    st.caption(f"{p['ks']:.2f} ks")
-            st.markdown("---")
-            
-            st.write("### 🔒 Odemknout Klientskou Zónu")
-            st.write("Chceš vidět, jak se tvé peníze rozmnoží? Vstup do zóny.")
-            c1, c2 = st.columns(2)
-            with c1: jmeno = st.text_input("Jméno")
-            with c2: email = st.text_input("Email")
-            
-            if st.button("🚀 Vstoupit do Zóny", type="primary"):
-                if "@" in email and len(jmeno) > 0:
-                    # 1. ZÁPIS DO GOOGLE SHEETS 📝
-                    uspech = uloz_do_google_sheet(jmeno, email, st.session_state.moje_portfolio)
-                    
-                    # 2. POKRAČOVÁNÍ V APLIKACI
-                    st.session_state.lead_captured = True
-                    st.session_state.user_name = jmeno
-                    if uspech:
-                        st.toast("Data uložena! Vítej.")
-                    st.rerun()
-                else:
-                    st.error("Vyplň údaje.")
+        st.markdown("---")
+        st.success(f"V košíku máš: {len(st.session_state.moje_portfolio)} firem.")
+        if st.button("🚀 Přejít na Můj Plán (Dashboard)", type="primary", use_container_width=True):
+             st.session_state.page = "dashboard"
+             st.rerun()
 
-    if st.session_state.hledani_hotovo:
-        nalezeno = [x for x in db_akcii if x['styl'] == cil and 
-                   (riziko == x['riziko'] or (riziko == "Střední" and x['riziko'] == "Nízké") or (riziko == "Vysoké")) and
-                   (not oblibene_sektory or x['sektor'] in oblibene_sektory)]
-
-        if nalezeno:
-            st.subheader(f"Nalezeno {len(nalezeno)} příležitostí")
-            with st.spinner('Analyzuji...'):
-                time.sleep(0.5)
-
-            for firma in nalezeno:
-                cena, mena, div_yield, logo, graf_data = ziskej_data_simulace(firma['ticker'], firma['styl'])
-                
-                with st.container(border=True):
-                    h1, h2, h3 = st.columns([1, 4, 2])
-                    with h1: 
-                        if logo: st.image(logo, width=50)
-                        else: st.write("📷")
-                    with h2:
-                        st.subheader(f"{firma['name']}")
-                        st.caption(f"{firma['sektor']}")
-                    with h3:
-                        st.metric("Cena", f"{cena} {mena}")
-                    
-                    c_graf, c_akce = st.columns([3, 1])
-                    with c_graf:
-                        st.area_chart(graf_data, height=120)
-                    with c_akce:
-                        st.write("")
-                        st.write("")
-                        if st.button("Do plánu", key=f"btn_{firma['ticker']}", type="primary", use_container_width=True):
-                            nakupni_okno(firma, cena, div_yield, logo)
-                time.sleep(0.02)
-        else:
-            st.warning("Zkus uvolnit filtry.")
-    else:
-        st.info("👈 Nastav filtry a jdeme na to.")
+elif st.session_state.page == "dashboard":
+    # --- DASHBOARD LOGIC START ---
+    total_invested = sum([p['investice_czk'] for p in st.session_state.moje_portfolio])
+    current_value_czk = 0
+    rocni_divi_czk = 0
+    portfolio_display = []
     
+    for p in st.session_state.moje_portfolio:
+        curr_price_usd, _, _ = ziskej_data_smart(p['ticker'], "Neznámý")
+        val_czk = p['ks'] * curr_price_usd * KURZ_USD_CZK
+        current_value_czk += val_czk
+        if p.get('yield'):
+            rocni_divi_czk += p['investice_czk'] * (p['yield']/100)
+            
+        status = get_position_status(curr_price_usd, p['buy_price_usd'])
+        
+        portfolio_display.append({
+            "ticker": p['ticker'],
+            "name": p['name'],
+            "ks": p['ks'],
+            "val_czk": val_czk,
+            "status_data": status
+        })
+
+    # --- UI DASHBOARD ---
+    st.balloons()
+    st.title(f"Plán pro: {st.session_state.user_name}")
+    
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Investováno", f"{int(total_invested):,} Kč")
+    diff_total = current_value_czk - total_invested
+    kpi2.metric("Aktuální hodnota", f"{int(current_value_czk):,} Kč", delta=f"{int(diff_total)} Kč", delta_color="normal" if diff_total >= 0 else "off")
+    kpi3.metric("Pasivní příjem (ročně)", f"{int(rocni_divi_czk):,} Kč", "Budoucí renta")
+
     st.markdown("---")
-    st.caption("⚠️ Edukativní nástroj. Nejedná se o investiční doporučení.")
+    st.subheader("📦 Tvoje Portfolio")
+    
+    for item in portfolio_display:
+        s = item['status_data']
+        with st.container():
+            col_icon, col_name, col_stats, col_status = st.columns([1, 3, 3, 2])
+            with col_icon: st.image(f"https://financialmodelingprep.com/image-stock/{item['ticker']}.png", width=50)
+            with col_name:
+                st.markdown(f"**{item['name']}** ({item['ticker']})")
+                st.caption(f"{item['ks']:.2f} ks")
+            with col_stats: st.write(f"Hodnota: **{int(item['val_czk'])} Kč**")
+            with col_status:
+                st.markdown(f"""
+                <div style="background-color: {s['color']}; padding: 5px; border-radius: 5px; color: white; text-align: center;">
+                    {s['icon']} {s['label']}
+                </div>
+                <div style="font-size: 12px; color: #aaa; text-align: center; margin-top: 2px;">
+                    {s['message']}
+                </div>
+                """, unsafe_allow_html=True)
+            st.divider()
+
+    st.subheader("❄️ Sněhová koule (Efekt času)")
+    st.write("Podívej se, co se stane za 20 let, když nebudeš panikařit.")
+    roky = list(range(2025, 2045))
+    hodnoty = [total_invested * (1.08 ** i) for i in range(len(roky))]
+    st.area_chart(pd.DataFrame({"Rok": roky, "Hodnota": hodnoty}).set_index("Rok"), color="#4b0082")
+
+    c_btn1, c_btn2 = st.columns(2)
+    with c_btn1: st.link_button("🏦 Otevřít cvičný účet u Brokera", "https://www.xtb.com/cz", type="primary", use_container_width=True)
+    with c_btn2:
+        if st.button("🔄 Resetovat simulaci", type="secondary", use_container_width=True):
+            st.session_state.moje_portfolio = []
+            st.session_state.page = "intro"
+            st.rerun()
