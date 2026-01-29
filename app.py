@@ -5,24 +5,85 @@ import time
 from datetime import datetime
 import yfinance as yf
 
-# --- 1. CONFIG & CSS ---
-st.set_page_config(page_title="Petrův Průvodce", page_icon="🦄", layout="wide")
+# --- 1. CONFIG & CHAMELEON LOGIC 🦎 ---
 
-st.markdown("""
-    <style>
-    .stApp {
-        background: linear-gradient(to bottom right, #0e1117, #161b22);
-        color: #e0e0e0;
+# Definice Partnerů (White Label nastavení)
+PARTNERS = {
+    "default": {
+        "name": "Petrův Průvodce",
+        "color_primary": "#8b5cf6", # Fialová (Default)
+        "color_bg": "#0e1117",
+        "cta_link": "https://www.xtb.com/cz",
+        "cta_text": "Otevřít účet u Brokera",
+        "logo_emoji": "🦄"
+    },
+    "xtb": {
+        "name": "XTB Guide",
+        "color_primary": "#29a643", # XTB Zelená
+        "color_bg": "#000000",
+        "cta_link": "https://www.xtb.com/cz",
+        "cta_text": "Pokračovat do xStation",
+        "logo_emoji": "💹" # Místo loga emoji, v reálu img url
+    },
+    "t212": {
+        "name": "Trading 212 Learn",
+        "color_primary": "#3399ff", # Trading212 Modrá
+        "color_bg": "#1e3a8a",
+        "cta_link": "https://www.trading212.com",
+        "cta_text": "Přejít do Trading 212",
+        "logo_emoji": "🔵"
+    },
+    "etoro": {
+        "name": "eToro Academy",
+        "color_primary": "#66cc33", # eToro Světle zelená
+        "color_bg": "#14532d",
+        "cta_link": "https://www.etoro.com",
+        "cta_text": "Investovat na eToro",
+        "logo_emoji": "🐂"
     }
-    .big-font { font-size: 20px !important; }
-    .card-highlight { background-color: #1f2937; padding: 15px; border-radius: 10px; border: 1px solid #374151; margin-bottom: 10px; }
+}
+
+# Získání parametru z URL (?partner=xtb)
+query_params = st.query_params
+active_partner_key = query_params.get("partner", "default")
+
+# Fallback na default, pokud klíč neexistuje
+if active_partner_key not in PARTNERS:
+    active_partner_key = "default"
+
+current_partner = PARTNERS[active_partner_key]
+
+st.set_page_config(page_title=current_partner["name"], page_icon=current_partner["logo_emoji"], layout="wide")
+
+# Dynamické CSS podle partnera
+st.markdown(f"""
+    <style>
+    .stApp {{
+        background: linear-gradient(to bottom right, {current_partner['color_bg']}, #111);
+        color: #e0e0e0;
+    }}
+    .big-font {{ font-size: 20px !important; }}
+    .card-highlight {{ 
+        background-color: rgba(255, 255, 255, 0.05); 
+        padding: 15px; 
+        border-radius: 10px; 
+        border: 1px solid rgba(255, 255, 255, 0.1); 
+        margin-bottom: 10px; 
+    }}
     
-    /* Vlastní styly pro Anti-Panic štítky */
-    .status-badge { padding: 5px 10px; border-radius: 5px; font-weight: bold; }
-    .status-discount { background-color: #2563eb; color: white; } /* Modrá je neutrální/informační */
-    .status-growth { background-color: #059669; color: white; }   /* Zelená pro růst */
+    /* Přebarvení tlačítek podle brandu */
+    div.stButton > button:first-child {{
+        background-color: {current_partner['color_primary']} !important;
+        color: white !important;
+        border: none !important;
+    }}
+    div.stButton > button:first-child:hover {{
+        filter: brightness(1.2);
+    }}
     
-    .stAlert { background-color: #1f2937; border: 1px solid #374151; color: #e0e0e0; }
+    /* Anti-Panic štítky */
+    .status-badge {{ padding: 5px 10px; border-radius: 5px; font-weight: bold; }}
+    .stAlert {{ background-color: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: #e0e0e0; }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -30,18 +91,13 @@ st.markdown("""
 if 'page' not in st.session_state: st.session_state.page = "intro" 
 if 'moje_portfolio' not in st.session_state: st.session_state.moje_portfolio = []
 if 'user_name' not in st.session_state: st.session_state.user_name = "Návštěvník"
-if 'temp_cil' not in st.session_state: st.session_state.temp_cil = "Dividenda" # Default
+if 'temp_cil' not in st.session_state: st.session_state.temp_cil = "Dividenda"
 
 KURZ_USD_CZK = 23.50
 
 # --- 2. JARVIS TOOLS (FUNKCE) ---
 
-# A) Anti-Panic Logic 🧠 (Compliance Update)
 def get_position_status(current_price, avg_buy_price):
-    """
-    Rozhoduje o statusu pozice.
-    UPDATE: Odstraněn imperativ 'Kupuj'. Nyní pouze informuje o slevě.
-    """
     diff = current_price - avg_buy_price
     percent_change = (diff / avg_buy_price) * 100
     
@@ -54,23 +110,21 @@ def get_position_status(current_price, avg_buy_price):
             "message": "Investice se zhodnocuje."
         }
     else:
-        # Psychologický trik zachován, ale text je právně bezpečný
         return {
             "status": "DISCOUNT",
-            "color": "#2563eb", # Modrá (Info), ne Oranžová (Warning)
+            # Použijeme barvu brandu pro 'pozitivní framing' slevy, nebo neutrální modrou
+            "color": current_partner['color_primary'], 
             "icon": "📉", 
             "label": f"Cena je níže ({percent_change:.1f} %)",
             "message": f"Aktuálně levnější o {abs(int(diff * KURZ_USD_CZK))} Kč na kus."
         }
 
-# B) Simulace Trhu (God Mode)
 def apply_market_sentiment(price):
     factor = st.session_state.get('market_factor', 1.0) 
     return price * factor
 
 # --- 3. DATABÁZE ---
 db_akcii = [
-    # DIVIDENDOVÉ
     {"ticker": "KO", "name": "Coca-Cola", "styl": "Dividenda", "riziko": "Nízké", "sektor": "Konzum", 
      "duvod": "Legenda. Když je krize, lidi pijí Colu.", "rule_40": False, "ps_ratio": 6.5, 
      "div_yield": 3.1, "div_months": ["Duben", "Červenec", "Říjen", "Prosinec"]},
@@ -86,8 +140,6 @@ db_akcii = [
     {"ticker": "O", "name": "Realty Income", "styl": "Dividenda", "riziko": "Střední", "sektor": "Nemovitosti", 
      "duvod": "The Monthly Dividend Company.", "rule_40": False, "ps_ratio": 5.0, 
      "div_yield": 5.2, "div_months": ["Leden", "Únor", "Březen", "Duben", "Květen", "Červen", "Červenec", "Srpen", "Září", "Říjen", "Listopad", "Prosinec"]},
-    
-    # RŮSTOVÉ
     {"ticker": "AAPL", "name": "Apple", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", 
      "duvod": "Ekosystém, ze kterého se neodchází.", "rule_40": True, "ps_ratio": 7.5, "div_yield": 0.5, "div_months": []},
     {"ticker": "MSFT", "name": "Microsoft", "styl": "Růst", "riziko": "Střední", "sektor": "Tech", 
@@ -168,7 +220,7 @@ def nakupni_okno(firma, cena_usd):
 
 # --- 7. SIDEBAR (GOD MODE) ---
 with st.sidebar:
-    st.header("⚙️ God Mode (Simulace)")
+    st.header(f"⚙️ God Mode ({current_partner['name']})")
     market_sentiment = st.slider("Nálada trhu", min_value=0.5, max_value=1.5, value=1.0, step=0.1)
     st.session_state.market_factor = market_sentiment
     if market_sentiment < 1.0:
@@ -180,7 +232,7 @@ with st.sidebar:
 if st.session_state.page == "intro":
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.title("🦄 Petrův Průvodce")
+        st.title(f"{current_partner['logo_emoji']} {current_partner['name']}")
         st.markdown("### Investování bez 'finanční latiny'.")
         st.write("Většina lidí se bojí ztráty, protože nerozumí trhu. My ti ukážeme, že je to jednodušší než nákup na eshopu.")
         
@@ -234,7 +286,6 @@ elif st.session_state.page == "wizard_1":
     
     volba = st.radio("Chci spíše:", ["🅰️ Pravidelná výplata (Dividenda)", "🅱️ Budování majetku (Růst)"])
     
-    # Vysvětlení metrik na základě volby (Educational Overlay)
     if "Dividenda" in volba:
         st.info("ℹ️ **Na co dáváme pozor:** U dividendových firem pro tebe hlídáme **historii vyplácení**. Hledáme firmy, které platí spolehlivě jako švýcarské hodinky, i když je krize.")
     else:
@@ -250,7 +301,6 @@ elif st.session_state.page == "wizard_2":
     st.subheader("2. Test odolnosti")
     st.write("Investoval jsi 10 000 Kč. Za měsíc vidíš, že hodnota klesla na 8 000 Kč. Co uděláš?")
     
-    # Rozepsané možnosti pro lepší empatii
     reakce = st.radio("Upřímně:", [
         "😱 Prodám to, protože se bojím, že spadnu na nulu.", 
         "😐 Nic neudělám, chci akcie držet dlouhodobě.", 
@@ -268,7 +318,6 @@ elif st.session_state.page == "wizard_3":
     st.progress(75)
     st.subheader("3. Čemu rozumíš?")
     
-    # Warren Buffett Quote
     st.markdown("""
     > *"Nikdy neinvestuj do byznysu, kterému nerozumíš."* > — Warren Buffett
     """)
@@ -283,7 +332,6 @@ elif st.session_state.page == "wizard_3":
         st.rerun()
 
 elif st.session_state.page == "results":
-    # Logika stejná jako předtím...
     st.progress(100)
     cil = st.session_state.temp_cil
     riziko = st.session_state.temp_riziko
@@ -314,7 +362,7 @@ elif st.session_state.page == "results":
                 with c3:
                     if st.button(f"🛒 Koupit", key=f"btn_{firma['ticker']}", type="secondary", use_container_width=True):
                         nakupni_okno(firma, cena_usd)
-                st.area_chart(graf_data, height=80, color="#059669" if cil=="Dividenda" else "#4b0082")
+                st.area_chart(graf_data, height=80, color=current_partner['color_primary'])
                 st.markdown('</div>', unsafe_allow_html=True)
 
     with col_detail:
@@ -328,7 +376,6 @@ elif st.session_state.page == "results":
              st.rerun()
 
 elif st.session_state.page == "dashboard":
-    # --- DASHBOARD LOGIC START ---
     total_invested = sum([p['investice_czk'] for p in st.session_state.moje_portfolio])
     current_value_czk = 0
     rocni_divi_czk = 0
@@ -351,7 +398,6 @@ elif st.session_state.page == "dashboard":
             "status_data": status
         })
 
-    # --- UI DASHBOARD ---
     st.balloons()
     st.title(f"Plán pro: {st.session_state.user_name}")
     
@@ -388,10 +434,12 @@ elif st.session_state.page == "dashboard":
     st.write("Podívej se, co se stane za 20 let, když nebudeš panikařit.")
     roky = list(range(2025, 2045))
     hodnoty = [total_invested * (1.08 ** i) for i in range(len(roky))]
-    st.area_chart(pd.DataFrame({"Rok": roky, "Hodnota": hodnoty}).set_index("Rok"), color="#4b0082")
+    st.area_chart(pd.DataFrame({"Rok": roky, "Hodnota": hodnoty}).set_index("Rok"), color=current_partner['color_primary'])
 
     c_btn1, c_btn2 = st.columns(2)
-    with c_btn1: st.link_button("🏦 Otevřít cvičný účet u Brokera", "https://www.xtb.com/cz", type="primary", use_container_width=True)
+    with c_btn1:
+        # Dynamické CTA tlačítko podle partnera
+        st.link_button(f"{current_partner['cta_text']}", current_partner['cta_link'], type="primary", use_container_width=True)
     with c_btn2:
         if st.button("🔄 Resetovat simulaci", type="secondary", use_container_width=True):
             st.session_state.moje_portfolio = []
