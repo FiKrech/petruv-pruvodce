@@ -19,7 +19,7 @@ def get_img_as_base64(file_path):
 # --- 1. CONFIG & CHAMELEON SETUP 🦎 ---
 PARTNERS = {
     "default": {
-        "name": "InvestFlow",
+        "name": "VestPrimer",
         "color_primary": "#8b5cf6", 
         "color_bg": "#0e1117",
         "cta_text": "Otevřít účet u Brokera",
@@ -489,3 +489,4 @@ elif st.session_state.page == "dashboard":
         st.session_state.moje_portfolio = []
         st.session_state.page = "intro"
         st.rerun()
+
