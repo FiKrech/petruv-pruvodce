@@ -19,7 +19,7 @@ def get_img_as_base64(file_path):
 # --- 1. CONFIG & CHAMELEON SETUP 🦎 ---
 PARTNERS = {
     "default": {
-        "name": "Petrův Průvodce",
+        "name": "InvestFlow",
         "color_primary": "#8b5cf6", 
         "color_bg": "#0e1117",
         "cta_text": "Otevřít účet u Brokera",
