@@ -4,6 +4,17 @@ import numpy as np
 import time
 from datetime import datetime
 import yfinance as yf
+import base64
+import os
+
+# --- 0. POMOCNÉ FUNKCE PRO OBRÁZKY 🖼️ ---
+def get_img_as_base64(file_path):
+    """Načte lokální obrázek a převede ho na base64 pro HTML zobrazení"""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
 
 # --- 1. CONFIG & CHAMELEON SETUP 🦎 ---
 PARTNERS = {
@@ -13,7 +24,8 @@ PARTNERS = {
         "color_bg": "#0e1117",
         "cta_text": "Otevřít účet u Brokera",
         "cta_link": "https://www.xtb.com/cz",
-        "logo_emoji": "🦄"
+        "logo_file": None, 
+        "logo_emoji": "🧮" # Změna: Kalkulačka místo Jednorožce
     },
     "xtb": {
         "name": "XTB Guide",
@@ -21,6 +33,7 @@ PARTNERS = {
         "color_bg": "#000000",
         "cta_text": "Pokračovat do xStation",
         "cta_link": "https://www.xtb.com/cz",
+        "logo_file": "logos/xtb.png", 
         "logo_emoji": "💹"
     },
     "t212": {
@@ -29,6 +42,7 @@ PARTNERS = {
         "color_bg": "#1e3a8a",
         "cta_text": "Přejít do Trading 212",
         "cta_link": "https://www.trading212.com",
+        "logo_file": "logos/t212.png",
         "logo_emoji": "🔵"
     },
     "etoro": {
@@ -37,6 +51,7 @@ PARTNERS = {
         "color_bg": "#14532d",
         "cta_text": "Investovat na eToro",
         "cta_link": "https://www.etoro.com",
+        "logo_file": "logos/etoro.png",
         "logo_emoji": "🐂"
     }
 }
@@ -193,7 +208,7 @@ def nakupni_okno(firma, cena_usd):
             "investice_czk": investice_czk,
             "buy_price_usd": cena_usd, 
             "yield": firma.get('div_yield', 0),
-            "months": firma.get('div_months', []) # PŘIDÁNO: Ukládáme i měsíce pro kalendář
+            "months": firma.get('div_months', [])
         })
         st.toast(f"{firma['name']} přidána do portfolia!", icon="🎒")
         time.sleep(1)
@@ -210,7 +225,24 @@ with st.sidebar:
 if st.session_state.page == "intro":
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.title(f"{current_partner['logo_emoji']} {current_partner['name']}")
+        # LOGIKA PRO LOGO Z DISKU (S BÍLÝM POZADÍM)
+        logo_b64 = None
+        if current_partner['logo_file']:
+            logo_b64 = get_img_as_base64(current_partner['logo_file'])
+            
+        if logo_b64:
+            # HTML trik: Bílý kontejner pro logo, aby bylo vidět i černé na tmavém
+            # Změna: width z 200 na 100
+            st.markdown(
+                f'<div style="background-color: white; padding: 15px; border-radius: 10px; display: inline-block; margin-bottom: 20px;">'
+                f'<img src="data:image/png;base64,{logo_b64}" width="100">' 
+                f'</div>', 
+                unsafe_allow_html=True
+            )
+        else:
+            # Defaultní text (Kalkulačka)
+            st.title(f"{current_partner['logo_emoji']} {current_partner['name']}")
+            
         st.markdown("### Investování konečně lidsky.")
         st.write("Zapomeň na složité grafy. Vyber si strategii podle toho, co ti dává smysl v běžném životě.")
         
